@@ -6,8 +6,10 @@ import 'auth/auth_gate.dart';
 import 'pages/jobb_notater_page.dart';
 import 'pages/add_page.dart';
 import 'widgets/bakgrunn_ny.dart';
-import '../pages/add_page.dart';
-import '../pages/detail_page.dart';
+import 'services/notification_service.dart';
+
+final NotificationService notificationService = NotificationService();
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -18,6 +20,8 @@ void main() async {
       autoRefreshToken: true,
     ),
   );
+
+  await notificationService.init();
 
   runApp(const FastNotesApp());
 }

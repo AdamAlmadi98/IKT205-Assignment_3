@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../notes_repo.dart';
-import '../main.dart'; 
 import '../widgets/bakgrunn_ny.dart';
 import '../pages/add_page.dart';
 import '../pages/detail_page.dart';

@@ -1,16 +1,20 @@
-import 'dart:io';
+// Denne filen håndterer siden for å lage et nytt notat.
+// Brukeren kan skrive tittel og innhold, ta bilde med kamera
+// eller velge bilde fra galleri. Bildet vises som forhåndsvisning
+// og kan fjernes før lagring. Når notatet lagres blir bildet
+// lastet opp til Supabase Storage med unikt navn, og filstien
+// lagres sammen med notatet i databasen. Etter lagring sendes
+// også en lokal notifikasjon til brukeren.
+
+
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import '../pages/detail_page.dart';
-import '../notes_repo.dart';
-import 'package:flutter/foundation.dart';
-import 'package:permission_handler/permission_handler.dart';
-import '../services/image_service.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:path/path.dart' as p;
-
-
-
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../notes_repo.dart';
+import '../services/image_service.dart';
+import '../services/notification_service.dart';
 
 class AddPage extends StatefulWidget {
   final NotesRepo repo;
@@ -25,10 +29,14 @@ class _AddPageState extends State<AddPage> {
   final titleCtrl = TextEditingController();
   final contentCtrl = TextEditingController();
   final ImageService imageService = ImageService();
+  final NotificationService notificationService = NotificationService();
+  
   bool saving = false;
 
-  File? selectedImage;
-  
+  // holder på valgt bilde
+  XFile? selectedImage;
+  Uint8List? selectedImageBytes;
+  String? selectedImageName;
 
   @override
   void dispose() {
@@ -37,97 +45,84 @@ class _AddPageState extends State<AddPage> {
     super.dispose();
   }
 
-    Future<bool> requestCameraPermission() async {
-  final status = await Permission.camera.request();
+  // tar bilde med kamera
+  Future<void> takePhoto() async {
+  final ImagePickResult result = await imageService.pickFromCamera();
 
-  if (status.isGranted) {
-    return true;
-  }
-
-  if (status.isPermanentlyDenied) {
-    await openAppSettings();
-  }
-
-  if (!mounted) return false;
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('Kameratilgang ble ikke gitt')),
-  );
-
-  return false;
-}
-
-Future<bool> requestGalleryPermission() async {
-  PermissionStatus status;
-
-  status = await Permission.photos.request();
-
-  if (status.isGranted || status.isLimited) {
-    return true;
-  }
-
-  status = await Permission.storage.request();
-
-  if (status.isGranted) {
-    return true;
-  }
-
-  if (status.isPermanentlyDenied) {
-    await openAppSettings();
-  }
-
-  if (!mounted) return false;
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('Tilgang til bilder ble ikke gitt')),
-  );
-
-  return false;
-}
-
-Future<void> takePhoto() async {
-  final image = await imageService.pickFromCamera();
-
-  if (image == null) {
+  // hvis ingen fil ble valgt eller noe feilet
+  if (result.file == null) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Kameratilgang ble ikke gitt.'),
+      SnackBar(
+        content: Text(
+          result.error ?? 'Kameratilgang ble ikke gitt eller bildet ble avbrutt.',
+        ),
       ),
     );
     return;
   }
 
+  final image = result.file!;
+  final bytes = await image.readAsBytes();
+
+  // lagrer valgt bilde lokalt i appen
   setState(() {
     selectedImage = image;
+    selectedImageBytes = bytes;
+    selectedImageName = p.basename(image.path);
   });
 }
 
-  Future<void> pickFromGallery() async {
-  final image = await imageService.pickFromGallery();
+  // velger bilde fra galleri
+Future<void> pickFromGallery() async {
+  final ImagePickResult result = await imageService.pickFromGallery();
 
-  if (image == null) {
+  // hvis bruker avbryter eller noe går galt
+  if (result.file == null) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Tilgang til galleri ble ikke gitt eller bildet ble avbrutt'),
+      SnackBar(
+        content: Text(
+          result.error ?? 'Valg av bilde ble avbrutt.',
+        ),
       ),
     );
     return;
   }
 
+  final image = result.file!;
+  final bytes = await image.readAsBytes();
+
+  // lagrer valgt bilde lokalt i appen
   setState(() {
     selectedImage = image;
+    selectedImageBytes = bytes;
+    selectedImageName = p.basename(image.path);
   });
 }
+
+  // fjerner bildet som er valgt
+  void removeSelectedImage() {
+    setState(() {
+      selectedImage = null;
+      selectedImageBytes = null;
+      selectedImageName = null;
+    });
+  }
 
   Future<void> save() async {
+  // stopper dobbeltklikk mens lagring pågår
   if (saving) return;
 
   final title = titleCtrl.text.trim();
   final content = contentCtrl.text.trim();
 
+  // enkel validering av feltene
   if (title.isEmpty || content.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Tittel og innhold kan ikke være tomme')),
+      const SnackBar(
+        content: Text('Tittel og innhold kan ikke være tomme'),
+      ),
     );
     return;
   }
@@ -135,32 +130,79 @@ Future<void> takePhoto() async {
   setState(() => saving = true);
 
   try {
-    String? imageUrl;
+    String? imagePath;
 
-    if (selectedImage != null) {
+    // laster opp bilde bare hvis bruker har valgt et
+    if (selectedImageBytes != null && selectedImageName != null) {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) {
+        throw Exception('Bruker er ikke logget inn.');
+      }
+
+      // sjekker filformat
+      final extension = p.extension(selectedImageName!).toLowerCase();
+      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+
+      if (!allowedExtensions.contains(extension)) {
+        throw Exception('Ugyldig filformat. Kun JPG, PNG og WebP er tillatt.');
+      }
+
+      debugPrint('Filnavn: $selectedImageName');
+      debugPrint('Antall bytes: ${selectedImageBytes!.length}');
+      debugPrint('MB i appen: ${selectedImageBytes!.length / (1024 * 1024)}');
+
+      // sjekker filstørrelse (maks 6 MB)
+      const maxSize = 6 * 1024 * 1024;
+      if (selectedImageBytes!.length > maxSize) {
+        throw Exception('Bildet er for stort. Maks størrelse er 15 MB.');
+      }
+
+      final cleanName = selectedImageName!
+          .replaceAll(RegExp(r'\s+'), '_')
+          .replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '');
+
+      final baseName = p.basenameWithoutExtension(cleanName);
+
+      // lager unikt filnavn så bilder ikke overskriver hverandre
       final fileName =
-        '${DateTime.now().millisecondsSinceEpoch}_${p.basename(selectedImage!.path)}';
+          '${DateTime.now().millisecondsSinceEpoch}_${baseName.isEmpty ? 'image' : baseName}$extension';
+
+      // legger bildet i mappe med bruker id
+      final filePath = '${user.id}/$fileName';
 
       await Supabase.instance.client.storage
           .from('notes_storage')
-          .upload(fileName, selectedImage!);
+          .uploadBinary(
+            filePath,
+            selectedImageBytes!,
+            fileOptions: FileOptions(
+              upsert: false,
+              contentType: selectedImage?.mimeType ?? 'image/png',
+            ),
+          );
 
-      imageUrl = Supabase.instance.client.storage
-          .from('notes_storage')
-          .getPublicUrl(fileName);
+      // lagrer filsti som skal kobles til notatet
+      imagePath = filePath;
     }
 
+    // lagrer selve notatet i databasen
     await widget.repo.addNote(
       title,
       content,
-      imageUrl: imageUrl,
+      imageUrl: imagePath,
+    );
+
+    // lokal notifikasjon etter vellykket lagring
+    await notificationService.showNotification(
+      title: 'Nytt notat: $title',
+      body: 'Notatet ble lagret.',
     );
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Notat lagret!')),
     );
-    Navigator.pop(context);
+    Navigator.pop(context, true);
   } catch (e) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -196,12 +238,11 @@ Future<void> takePhoto() async {
               ),
             ),
             const SizedBox(height: 12),
-
             Row(
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: takePhoto,
+                    onPressed: saving ? null : takePhoto,
                     icon: const Icon(Icons.camera_alt),
                     label: const Text('Ta bilde'),
                   ),
@@ -209,39 +250,56 @@ Future<void> takePhoto() async {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: pickFromGallery,
+                    onPressed: saving ? null : pickFromGallery,
                     icon: const Icon(Icons.photo),
                     label: const Text('Galleri'),
                   ),
                 ),
               ],
             ),
-
             const SizedBox(height: 12),
-            if (selectedImage != null)
-                ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: kIsWeb
-                        ? Image.network(
-                            selectedImage!.path,
-                            height: 180,
-                            width: double.infinity,
-                            fit: BoxFit.contain,
-                        )
-                    : Image.file(
-                            selectedImage!,
-                            height: 180,
-                            width: double.infinity,
-                            fit: BoxFit.contain,
-            ),
-            ),
-            if (selectedImage != null) const SizedBox(height: 12),
-
+            if (selectedImageBytes != null) ...[
+              // forhåndsvisning av valgt bilde
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.memory(
+                  selectedImageBytes!,
+                  height: 180,
+                  width: double.infinity,
+                  fit: BoxFit.contain,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: saving ? null : removeSelectedImage,
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Fjern valgt bilde'),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
+                // deaktiverer knappen mens notatet lagres
                 onPressed: saving ? null : save,
-                child: Text(saving ? 'Lagrer…' : 'Lagre'),
+                child: saving
+                    ? const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          SizedBox(width: 10),
+                          Text('Lagrer...'),
+                        ],
+                      )
+                    : const Text('Lagre'),
               ),
             ),
           ],

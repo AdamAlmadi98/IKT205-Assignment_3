@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import '../pages/add_page.dart';
 import '../notes_repo.dart';
 import '../pages/edit_page.dart';
-
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 
 
@@ -80,7 +79,7 @@ class _DetailPageState extends State<DetailPage> {
   Widget build(BuildContext context) {
   final title = (note['title'] ?? '').toString();
   final content = (note['content'] ?? '').toString();
-  final imageUrl = (note['image_url'] ?? '').toString();
+  final imagePath = (note['image_url'] ?? '').toString();
 
   return Scaffold(
     appBar: AppBar(
@@ -112,16 +111,31 @@ class _DetailPageState extends State<DetailPage> {
           Text(content.isEmpty ? '— (tomt notat) —' : content),
           const SizedBox(height: 16),
 
-          if (imageUrl.isNotEmpty)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.network(
-                imageUrl,
-                width: double.infinity,
-                height: 250,
-                fit: BoxFit.contain,
-              ),
-            ),
+          if (imagePath.isNotEmpty)
+  FutureBuilder<String>(
+    future: Supabase.instance.client.storage
+        .from('notes_storage')
+        .createSignedUrl(imagePath, 3600),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Center(child: CircularProgressIndicator());
+      }
+
+      if (snapshot.hasError || !snapshot.hasData || snapshot.data!.isEmpty) {
+        return const Text('Kunne ikke laste bildet');
+      }
+
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.network(
+          snapshot.data!,
+          width: double.infinity,
+          height: 250,
+          fit: BoxFit.contain,
+        ),
+      );
+    },
+  ),
         ],
       ),
     ),
